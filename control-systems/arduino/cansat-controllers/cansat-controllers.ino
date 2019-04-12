@@ -1,10 +1,21 @@
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
 #include <Servo.h>
+
 
 const int N_CLUSTERS = 20;
 const float FLOAT_MAX = 3.4028235E+38;
-const float F_ITERS = 10;
+const float F_ITERS = 1;
+const float FINS_OFFSET[3] = {90, 90, 90};
+const float FINS_MIN[3] = {60, 60, 60};
+const float FINS_MAX[3] = {120, 120, 120};
 const int finPins[3] = {9, 10, 11};
 Servo fins[3];
+Adafruit_BNO055 bno = Adafruit_BNO055(55);
+imu::Vector<3> euler;
+imu::Vector<3> gyroscope;
 
 float kmeans_angles [20][3] = {
   {2.0,23.0,21.0},
@@ -65,7 +76,7 @@ float b[3] = {0, 0, 0};
 
 
 /* Closest Point to K-Means Centers */
-void closest_point(float *x, float* y) {
+void closest_point(float *x, float* y, const int N) {
   float minimum = FLOAT_MAX;
   int argmin = 0;
   float tmp;
@@ -77,7 +88,9 @@ void closest_point(float *x, float* y) {
     }
     
   }
-  y = kmeans_angles[argmin];
+  for (int i = 0; i < N; i++) y[i] = kmeans_angles[argmin][i];
+  
+
 }
 
 
@@ -124,19 +137,34 @@ void lincomb(float *x, float *y, const int N) {
   add(temp, b, y, N);
 }
 
+float wrap_angle(float x) {
+  if (x >= 180) {
+    return x - 360;  
+  } else {
+    return x;
+  }
+  
+}
+
+
 
 
 // Turn fins to a position
-void turn_fins(float *thetas, const int N, const int iters) {
+void turn_fins(float *thetas, const int N, const int iters, bool degs) {
    float us[N];
 
    for (int i = 0; i < N; i++) {
-    us[i] = rad_to_deg(thetas[i]) / (1.0 * iters);
+    if (degs) {
+      us[i] = thetas[i] / (1.0 * iters);
+    } else {
+      us[i] = rad_to_deg(thetas[i]) / (1.0 * iters); 
+    }
+    
    }
 
    for (int i = 0; i < iters; i++) {
     for (int j = 0; j < N; j++) {
-      fins[j].write(us[j]);  
+      fins[j].write(constrain(us[j] + FINS_OFFSET[j], FINS_MIN[j], FINS_MAX[j]));  
     }
    }
   
@@ -149,8 +177,8 @@ void turn_fins(float *thetas, const int N, const int iters) {
 const float K_p_yaw = 0.00324;
 const float K_d_yaw = 0.0028;
 
-float calculate_z_moment(float &psi, float &psi_dot, float &moment) {
-  moment = K_p_yaw * psi + K_d_yaw * psi_dot;
+float calculate_z_moment(float psi, float psi_dot, float &moment) {
+  moment = K_p_yaw * wrap_angle(psi) + K_d_yaw * psi_dot;
 }
 
 
@@ -159,7 +187,7 @@ float calculate_z_moment(float &psi, float &psi_dot, float &moment) {
 const float KMx[4] = { -0.1099,    -1.7944,   1.7286,    -0.0000 };
 const float KMy[4] = { -1.7286,    -0.0000,    -0.1099,    +1.7944 };
 
-void calculate_xy_moments(float &phi, float &phi_dot, float &theta, float &theta_dot, float *moments) {
+void calculate_xy_moments(float phi, float phi_dot, float theta, float theta_dot, float *moments) {
   float x[6];
   x[0] = phi;
   x[1] = phi_dot;
@@ -169,7 +197,7 @@ void calculate_xy_moments(float &phi, float &phi_dot, float &theta, float &theta
   moments[1] = dot(KMy, x, 4);
 }
 
-float ttmp = 0;
+
 float Mz;
 float Mxy[2];
 float M[3];
@@ -179,17 +207,58 @@ float finPos[3];
 void control() {
   // Main controller routine
   // Calculate Moments from controller
-  // TODO CHANGE
-  calculate_z_moment(ttmp, ttmp, Mz);
-  calculate_xy_moments(ttmp, ttmp, ttmp, ttmp, Mxy);
+
+  // Initialize Sensor
+  euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+  gyroscope = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+
+
+  // Debug Statements
+  Serial.print(F("Orientation: "));
+  Serial.print(euler.x());
+  Serial.print(F(" "));
+  Serial.print(euler.y());
+  Serial.print(F(" "));
+  Serial.print(euler.z());
+  Serial.print(F(""));
+
+  Serial.print(F(" Gyros: "));
+  Serial.print(gyroscope.x());
+  Serial.print(F(" "));
+  Serial.print(gyroscope.y());
+  Serial.print(F(" "));
+  Serial.print(gyroscope.z());
+  Serial.print(F(""));
+  calculate_z_moment(euler.x(), gyroscope.x(), Mz);
+  calculate_xy_moments(euler.y(), gyroscope.y(), euler.z(), gyroscope.z(), Mxy);
+  
+  
   M[0] = Mxy[0];
   M[1] = Mxy[1];
   M[2] = Mz;
 
-  // Get fin position
-  closest_point(M, finPos);
+  Serial.print(F(" M: "));
+  Serial.print(M[0]);
+  Serial.print(F(" "));
+  Serial.print(M[1]);
+  Serial.print(F(" "));
+  Serial.print(M[2]);
+  Serial.print(F(""));
 
-  turn_fins(finPos, 3, F_ITERS);
+
+  // Get fin position
+  closest_point(M, finPos, 3);
+
+  Serial.print(F(" F: "));
+  Serial.print(finPos[0]);
+  Serial.print(F(" "));
+  Serial.print(finPos[1]);
+  Serial.print(F(" "));
+  Serial.print(finPos[2]);
+  Serial.println(F(""));
+
+
+  turn_fins(finPos, 3, F_ITERS, false);
 }
 
 
@@ -198,10 +267,20 @@ void setup() {
     fins[i].attach(finPins[i]);   
   }
 
+  Serial.begin(115200);
+
+  if(!bno.begin())
+  {
+    /* There was a problem detecting the BNO055 ... check your connections */
+    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+    while(1);
+  }
+
+  bno.setExtCrystalUse(true);
 
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-
+  control();
+  delay(500);
 }
