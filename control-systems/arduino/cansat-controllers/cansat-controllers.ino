@@ -5,6 +5,21 @@
 #include <Servo.h>
 
 
+
+// Moments of Inertia
+const float m = 75e-3;
+const float r = 0.35;
+const float Mass = 0.33;
+const float mu = (Mass * m) / (Mass + m);
+const float R = 0.05;
+const float H = 0.3;
+const float h = 0.15;
+const float rho = h * m / (Mass + m);
+const float rho_h = h * Mass / (Mass + m);
+const float Ix = 1 / 4 * m * r * r + 1 / 12 * Mass * (3 * R * R + H * H) + Mass * rho_h * rho_h + m * rho * rho;
+const float Iy = Ix;
+const float Iz = 1 / 2 * m * r * r;
+
 const int N_CLUSTERS = 20;
 const float FLOAT_MAX = 3.4028235E+38;
 const float F_ITERS = 1;
@@ -16,6 +31,24 @@ Servo fins[3];
 Adafruit_BNO055 bno = Adafruit_BNO055(55);
 imu::Vector<3> euler;
 imu::Vector<3> gyroscope;
+
+typedef struct coords_t {
+  float phi, theta, psi;
+  float phi_dot, theta_dot, psi_dot;
+  
+} coordinates;
+
+coordinates coords;
+
+void transform_coords() {
+  coords.phi = deg_to_rad(-euler.z());
+  coords.theta = deg_to_rad(-euler.y());
+  coords.psi = deg_to_rad(- wrap_angle(euler.x()));
+
+  coords.phi_dot = gyroscope.x();
+  coords.theta_dot = gyroscope.y();
+  coords.psi_dot = gyroscope.z();
+}
 
 float kmeans_angles [20][3] = {
   {2.0,23.0,21.0},
@@ -99,6 +132,9 @@ float rad_to_deg(float rad) {
   return 180.0 / PI * rad;
 }
 
+float deg_to_rad(float deg) {
+  return PI / 180 * deg;
+}
 
 // Dot product of two-element vectors
 float dot(float *x, float*y, const int N) {
@@ -172,29 +208,28 @@ void turn_fins(float *thetas, const int N, const int iters, bool degs) {
 }
 
 /* YAW CONTROL */
-
-// PD Controller Parameters
-const float K_p_yaw = 0.00324;
-const float K_d_yaw = 0.0028;
-
-float calculate_z_moment(float psi, float psi_dot, float &moment) {
-  moment = K_p_yaw * wrap_angle(psi) + K_d_yaw * psi_dot;
-}
-
-
 /* PITCH AND ROLL CONTROL */
-// Controller parameters
-const float KMx[4] = { -0.1099,    -1.7944,   1.7286,    -0.0000 };
-const float KMy[4] = { -1.7286,    -0.0000,    -0.1099,    +1.7944 };
 
-void calculate_xy_moments(float phi, float phi_dot, float theta, float theta_dot, float *moments) {
-  float x[6];
-  x[0] = phi;
-  x[1] = phi_dot;
-  x[2] = theta;
-  x[3] = theta_dot;
-  moments[0] = dot(KMx, x, 4); 
-  moments[1] = dot(KMy, x, 4);
+// Controller parameters
+const float KMx[4] = {     1.7286,    0.0000,    0.1099,    1.7944 };
+const float KMy[4] = {     0.1099,    1.7944,   -1.7286,    0.0000 };
+//const float KMz[2] = { -0.0032  ,  0 };
+const float KMz[2] = { 1  ,  0 };
+
+
+void calculate_moments(float *moments) {
+  float x1[4];
+  float x2[2];
+  x1[0] = coords.phi;
+  x1[1] = coords.phi_dot;
+  x1[2] = coords.theta;
+  x1[3] = coords.theta_dot;
+  x2[0] = coords.psi;
+  x2[1] = coords.psi_dot;
+  moments[0] = - Ix * dot(KMx, x1, 4); 
+  moments[1] = - Ix * dot(KMy, x1, 4);
+  moments[2] = -dot(KMz, x2, 2);
+  
 }
 
 
@@ -203,61 +238,61 @@ float Mxy[2];
 float M[3];
 float finPos[3];
 
+void get_measurements() {
+  euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+  gyroscope = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+  transform_coords();
+}
+
 /* MAIN CONTROL ROUTINES */
 void control() {
   // Main controller routine
   // Calculate Moments from controller
 
-  // Initialize Sensor
-  euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
-  gyroscope = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
-
+  get_measurements();
+/*
 
   // Debug Statements
-  Serial.print(F("Orientation: "));
-  Serial.print(euler.x());
+  Serial.print(" Phi / Pitch: "); 
+  Serial.print(coords.phi);
   Serial.print(F(" "));
-  Serial.print(euler.y());
-  Serial.print(F(" "));
-  Serial.print(euler.z());
-  Serial.print(F(""));
+  Serial.print(coords.phi_dot);
 
-  Serial.print(F(" Gyros: "));
-  Serial.print(gyroscope.x());
+  Serial.print(" | Theta / Roll: "); 
+  Serial.print(coords.theta);
   Serial.print(F(" "));
-  Serial.print(gyroscope.y());
+  Serial.print(coords.theta_dot);
+ 
+  Serial.print(" | Psi / Yaw: "); 
+  Serial.print(coords.psi);
   Serial.print(F(" "));
-  Serial.print(gyroscope.z());
-  Serial.print(F(""));
-  calculate_z_moment(euler.x(), gyroscope.x(), Mz);
-  calculate_xy_moments(euler.y(), gyroscope.y(), euler.z(), gyroscope.z(), Mxy);
-  
-  
-  M[0] = Mxy[0];
-  M[1] = Mxy[1];
-  M[2] = Mz;
+  Serial.print(coords.psi_dot);
+    
+*/
+  calculate_moments(M);
+ 
 
   Serial.print(F(" M: "));
-  Serial.print(M[0]);
+  Serial.print(M[0], 5);
   Serial.print(F(" "));
-  Serial.print(M[1]);
+  Serial.print(M[1], 5);
   Serial.print(F(" "));
-  Serial.print(M[2]);
+  Serial.print(M[2], 5);
   Serial.print(F(""));
 
 
   // Get fin position
   closest_point(M, finPos, 3);
-
+/*
   Serial.print(F(" F: "));
   Serial.print(finPos[0]);
   Serial.print(F(" "));
   Serial.print(finPos[1]);
   Serial.print(F(" "));
   Serial.print(finPos[2]);
-  Serial.println(F(""));
-
-
+  
+*/
+Serial.println(F(""));
   turn_fins(finPos, 3, F_ITERS, false);
 }
 
@@ -282,5 +317,5 @@ void setup() {
 
 void loop() {
   control();
-  delay(500);
+  delay(100);
 }
