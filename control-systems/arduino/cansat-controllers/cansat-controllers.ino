@@ -3,7 +3,7 @@
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
 #include <Servo.h>
-
+#include <Kalman.h>
 
 
 // Moments of Inertia
@@ -22,6 +22,8 @@ const float Iz = 1 / 2 * m * r * r;
 
 const int N_CLUSTERS = 20;
 const float FLOAT_MAX = 3.4028235E+38;
+
+// Fins configurations
 const float F_ITERS = 1;
 const float FINS_OFFSET[3] = {90, 90, 90};
 const float FINS_MIN[3] = {60, 60, 60};
@@ -29,9 +31,28 @@ const float FINS_MAX[3] = {120, 120, 120};
 const int finPins[3] = {9, 10, 11};
 Servo fins[3];
 Adafruit_BNO055 bno = Adafruit_BNO055(55);
+
+// Sampling period
+const float SAMPLING_PERIOD = 0.001;
+
+// IMU Structs
 imu::Vector<3> euler;
 imu::Vector<3> gyroscope;
+imu::Vector<3> acceleration;
 
+// Kalman Filters
+Kalman kalman_phi(0.01, 0.01, 1, 1, 1);
+Kalman kalman_theta(0.01, 0.01, 1, 1, 1);
+Kalman kalman_psi(0.01, 0.01, 1, 1, 1);
+
+// Moments (in Nm)
+float M[3];
+
+// Fin Positions (in degrees) 
+float finPos[3];
+
+
+// Struct to hold coordinates to our reference frame
 typedef struct coords_t {
   float phi, theta, psi;
   float phi_dot, theta_dot, psi_dot;
@@ -40,14 +61,24 @@ typedef struct coords_t {
 
 coordinates coords;
 
-void transform_coords() {
+// Transform coordinates to our reference frame
+void transform_coords(bool raw) {
+  
   coords.phi = deg_to_rad(-euler.z());
   coords.theta = deg_to_rad(-euler.y());
   coords.psi = deg_to_rad(- wrap_angle(euler.x()));
 
-  coords.phi_dot = gyroscope.x();
-  coords.theta_dot = gyroscope.y();
-  coords.psi_dot = gyroscope.z();
+  if (raw) {
+    coords.phi_dot = gyroscope.x();
+    coords.theta_dot = gyroscope.y();
+    coords.psi_dot = gyroscope.z();  
+  }
+  else {
+    coords.phi_dot = kalman_phi.filter(gyroscope.x(), acceleration.x() * SAMPLING_PERIOD);
+    coords.theta_dot = kalman_theta.filter(gyroscope.y(), acceleration.y() * SAMPLING_PERIOD);
+    coords.psi_dot = kalman_psi.filter(gyroscope.z(), acceleration.z() * SAMPLING_PERIOD); 
+  }
+  
 }
 
 float kmeans_angles [20][3] = {
@@ -104,11 +135,8 @@ float W[3][3] = {
 
 float b[3] = {0, 0, 0};
 
-// TODO CHANGE SERVOS
 
-
-
-/* Closest Point to K-Means Centers */
+// Closest Point to K-Means Centers
 void closest_point(float *x, float* y, const int N) {
   float minimum = FLOAT_MAX;
   int argmin = 0;
@@ -132,6 +160,7 @@ float rad_to_deg(float rad) {
   return 180.0 / PI * rad;
 }
 
+// Convert degrees to rad
 float deg_to_rad(float deg) {
   return PI / 180 * deg;
 }
@@ -167,12 +196,14 @@ void matvecmul(float A[3][3], float *x, float *y, const int N) {
   
 }
 
+// Return a linear combination y = Wx + b
 void lincomb(float *x, float *y, const int N) {
   float *temp;
   matvecmul(W, x, temp, N);
   add(temp, b, y, N);
 }
 
+// Wraps angles for yaw
 float wrap_angle(float x) {
   if (x >= 180) {
     return x - 360;  
@@ -181,8 +212,6 @@ float wrap_angle(float x) {
   }
   
 }
-
-
 
 
 // Turn fins to a position
@@ -211,13 +240,15 @@ void turn_fins(float *thetas, const int N, const int iters, bool degs) {
 /* PITCH AND ROLL CONTROL */
 
 // Controller parameters
+
+// Gains
 const float KMx[4] = {     1.7286,    0.0000,    0.1099,    1.7944 };
 const float KMy[4] = {     0.1099,    1.7944,   -1.7286,    0.0000 };
-//const float KMz[2] = { -0.0032  ,  0 };
 const float KMz[2] = { 1  ,  0 };
 
 
 void calculate_moments(float *moments) {
+  // Create the state vectors
   float x1[4];
   float x2[2];
   x1[0] = coords.phi;
@@ -226,6 +257,7 @@ void calculate_moments(float *moments) {
   x1[3] = coords.theta_dot;
   x2[0] = coords.psi;
   x2[1] = coords.psi_dot;
+  // u = - kx
   moments[0] = - Ix * dot(KMx, x1, 4); 
   moments[1] = - Ix * dot(KMy, x1, 4);
   moments[2] = -dot(KMz, x2, 2);
@@ -233,26 +265,17 @@ void calculate_moments(float *moments) {
 }
 
 
-float Mz;
-float Mxy[2];
-float M[3];
-float finPos[3];
-
 void get_measurements() {
+  // Get raw measurements from BNO055
   euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
   gyroscope = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
-  transform_coords();
+  acceleration = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
+  // Transform to our reference frame w/no filtering
+  transform_coords(true); // Change argument to false to use Kalman Filters
 }
 
-/* MAIN CONTROL ROUTINES */
-void control() {
-  // Main controller routine
-  // Calculate Moments from controller
-
-  get_measurements();
-/*
-
-  // Debug Statements
+// Log measurements
+void logging() {
   Serial.print(" Phi / Pitch: "); 
   Serial.print(coords.phi);
   Serial.print(F(" "));
@@ -267,11 +290,6 @@ void control() {
   Serial.print(coords.psi);
   Serial.print(F(" "));
   Serial.print(coords.psi_dot);
-    
-*/
-  calculate_moments(M);
- 
-
   Serial.print(F(" M: "));
   Serial.print(M[0], 5);
   Serial.print(F(" "));
@@ -279,20 +297,31 @@ void control() {
   Serial.print(F(" "));
   Serial.print(M[2], 5);
   Serial.print(F(""));
-
-
-  // Get fin position
-  closest_point(M, finPos, 3);
-/*
   Serial.print(F(" F: "));
   Serial.print(finPos[0]);
   Serial.print(F(" "));
   Serial.print(finPos[1]);
   Serial.print(F(" "));
   Serial.print(finPos[2]);
-  
-*/
-Serial.println(F(""));
+  Serial.println(F(""));
+ 
+}
+
+/* MAIN CONTROL ROUTINES */
+void control() {
+  // Main controller routine
+
+  // Get measurements from IMU and filter them
+  get_measurements();
+  calculate_moments(M);
+
+  // Log measurements to output
+  logging();
+
+  // Get fin position
+  closest_point(M, finPos, 3);
+
+  // Turn fins to desired position
   turn_fins(finPos, 3, F_ITERS, false);
 }
 
@@ -317,5 +346,5 @@ void setup() {
 
 void loop() {
   control();
-  delay(100);
+  delay(SAMPLING_PERIOD * 1000);
 }
