@@ -45,6 +45,9 @@ Kalman kalman_phi(0.01, 0.01, 1, 1, 1);
 Kalman kalman_theta(0.01, 0.01, 1, 1, 1);
 Kalman kalman_psi(0.01, 0.01, 1, 1, 1);
 
+// Complementary Gains (must add to 1)
+const float COMP_GAIN[2] = { 0.5, 0.5 };
+
 // Moments (in Nm)
 float M[3];
 
@@ -60,9 +63,10 @@ typedef struct coords_t {
 } coordinates;
 
 coordinates coords;
+coordinates prev_coords;
 
 // Transform coordinates to our reference frame
-void transform_coords(bool raw) {
+void transform_coords(bool raw, bool complementary) {
   
   coords.phi = deg_to_rad(-euler.z());
   coords.theta = deg_to_rad(-euler.y());
@@ -77,6 +81,16 @@ void transform_coords(bool raw) {
     coords.phi_dot = kalman_phi.filter(gyroscope.x(), acceleration.x() * SAMPLING_PERIOD);
     coords.theta_dot = kalman_theta.filter(gyroscope.y(), acceleration.y() * SAMPLING_PERIOD);
     coords.psi_dot = kalman_psi.filter(gyroscope.z(), acceleration.z() * SAMPLING_PERIOD); 
+  }
+
+  if (complementary) {
+    float phi_dot_e = (coords.phi - prev_coords.phi) / SAMPLING_PERIOD;
+    float theta_dot_e = (coords.theta - prev_coords.theta) / SAMPLING_PERIOD;
+    float psi_dot_e = (coords.psi - prev_coords.psi) / SAMPLING_PERIOD; 
+    coords.phi_dot = COMP_GAIN[0] * coords.phi_dot + COMP_GAIN[1] * phi_dot_e;
+    coords.theta_dot = COMP_GAIN[0] * coords.theta_dot + COMP_GAIN[1] * theta_dot_e;
+    coords.psi_dot = COMP_GAIN[0] * coords.psi_dot + COMP_GAIN[1] * psi_dot_e;
+    
   }
   
 }
@@ -271,7 +285,7 @@ void get_measurements() {
   gyroscope = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
   acceleration = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
   // Transform to our reference frame w/no filtering
-  transform_coords(true); // Change argument to false to use Kalman Filters
+  transform_coords(true, false); // Change argument to false to use Kalman Filters
 }
 
 // Log measurements
@@ -323,6 +337,8 @@ void control() {
 
   // Turn fins to desired position
   turn_fins(finPos, 3, F_ITERS, false);
+
+  prev_coords = coords;
 }
 
 
