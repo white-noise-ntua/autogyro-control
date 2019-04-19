@@ -21,7 +21,7 @@ I3 = Iz;
 I2 = Iz - Iy;
 
 g = 9.89; % gravitational acceleration (m / s^2)
-omega_rpm = 500; % speed of gyro (rpm)
+omega_rpm = -500; % speed of gyro (rpm) minus sign is for correct gains
 omega = pi / 30 * omega_rpm;
 % Inertial matrices by Fusion
 % I1 = 4.75e-3;
